@@ -4,7 +4,7 @@
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option) 
+ * Software Foundation; either version 2 of the License, or (at your option)
  * any later version.  See COPYING for more details.
  */
 
@@ -21,7 +21,6 @@
 #ifndef WIN32
 #include <sys/resource.h>
 #endif
-#include <pthread.h>
 #include <getopt.h>
 #include <jansson.h>
 #include <curl/curl.h>
@@ -30,7 +29,22 @@
 
 #define PROGRAM_NAME		"minerd"
 #define DEF_RPC_URL		"http://127.0.0.1:8332/"
-#define DEF_RPC_USERPASS	"rpcuser:rpcpass"
+#define DEF_RPC_USERNAME	"rpcuser"
+#define DEF_RPC_PASSWORD	"rpcpass"
+#define DEF_RPC_USERPASS	DEF_RPC_USERNAME ":" DEF_RPC_PASSWORD
+
+enum workio_commands {
+	WC_GET_WORK,
+	WC_SUBMIT_WORK,
+};
+
+struct workio_cmd {
+	enum workio_commands	cmd;
+	struct thr_info		*thr;
+	union {
+		struct work	*work;
+	} u;
+};
 
 enum sha256_algos {
 	ALGO_C,			/* plain C */
@@ -60,16 +74,25 @@ static const char *algo_names[] = {
 
 bool opt_debug = false;
 bool opt_protocol = false;
+bool want_longpoll = true;
+bool have_longpoll = false;
+bool use_syslog = false;
 static bool opt_quiet = false;
 static int opt_retries = 10;
 static int opt_fail_pause = 30;
-static int opt_scantime = 5;
+int opt_scantime = 5;
 static json_t *opt_config;
 static const bool opt_time = true;
 static enum sha256_algos opt_algo = ALGO_C;
 static int opt_n_threads = 1;
 static char *rpc_url;
-static char *userpass;
+static char *rpc_userpass;
+static char *rpc_user, *rpc_pass;
+struct thr_info *thr_info;
+static int work_thr_id;
+int longpoll_thr_id;
+struct work_restart *work_restart = NULL;
+pthread_mutex_t time_lock;
 
 
 struct option_help {
@@ -109,6 +132,9 @@ static struct option_help options_help[] = {
 	{ "debug",
 	  "(-D) Enable debug output (default: off)" },
 
+	{ "no-longpoll",
+	  "Disable X-Long-Polling support (default: enabled)" },
+
 	{ "protocol-dump",
 	  "(-P) Verbose dump of protocol-level activities (default: off)" },
 
@@ -124,6 +150,11 @@ static struct option_help options_help[] = {
 	  "(-s N) Upper bound on time spent scanning current work,\n"
 	  "\tin seconds. (default: 5)" },
 
+#ifdef HAVE_SYSLOG_H
+	{ "syslog",
+	  "Use system log for output messages (default: standard error)" },
+#endif
+
 	{ "threads N",
 	  "(-t N) Number of miner threads (default: 1)" },
 
@@ -134,21 +165,36 @@ static struct option_help options_help[] = {
 	{ "userpass USERNAME:PASSWORD",
 	  "Username:Password pair for bitcoin JSON-RPC server "
 	  "(default: " DEF_RPC_USERPASS ")" },
+
+	{ "user USERNAME",
+	  "(-u USERNAME) Username for bitcoin JSON-RPC server "
+	  "(default: " DEF_RPC_USERNAME ")" },
+
+	{ "pass PASSWORD",
+	  "(-p PASSWORD) Password for bitcoin JSON-RPC server "
+	  "(default: " DEF_RPC_PASSWORD ")" },
 };
 
 static struct option options[] = {
-	{ "help", 0, NULL, 'h' },
 	{ "algo", 1, NULL, 'a' },
 	{ "config", 1, NULL, 'c' },
-	{ "quiet", 0, NULL, 'q' },
 	{ "debug", 0, NULL, 'D' },
+	{ "help", 0, NULL, 'h' },
+	{ "no-longpoll", 0, NULL, 1003 },
+	{ "pass", 1, NULL, 'p' },
 	{ "protocol-dump", 0, NULL, 'P' },
+	{ "quiet", 0, NULL, 'q' },
 	{ "threads", 1, NULL, 't' },
 	{ "retries", 1, NULL, 'r' },
 	{ "retry-pause", 1, NULL, 'R' },
 	{ "scantime", 1, NULL, 's' },
+#ifdef HAVE_SYSLOG_H
+	{ "syslog", 0, NULL, 1004 },
+#endif
 	{ "url", 1, NULL, 1001 },
+	{ "user", 1, NULL, 'u' },
 	{ "userpass", 1, NULL, 1002 },
+
 	{ }
 };
 
@@ -169,12 +215,12 @@ static bool jobj_binary(const json_t *obj, const char *key,
 
 	tmp = json_object_get(obj, key);
 	if (!tmp) {
-		fprintf(stderr, "JSON key '%s' not found\n", key);
+		applog(LOG_ERR, "JSON key '%s' not found", key);
 		return false;
 	}
 	hexstr = json_string_value(tmp);
 	if (!hexstr) {
-		fprintf(stderr, "JSON key '%s' is not a string\n", key);
+		applog(LOG_ERR, "JSON key '%s' is not a string", key);
 		return false;
 	}
 	if (!hex2bin(buf, hexstr, buflen))
@@ -187,22 +233,22 @@ static bool work_decode(const json_t *val, struct work *work)
 {
 	if (!jobj_binary(val, "midstate",
 			 work->midstate, sizeof(work->midstate))) {
-		fprintf(stderr, "JSON inval midstate\n");
+		applog(LOG_ERR, "JSON inval midstate");
 		goto err_out;
 	}
 
 	if (!jobj_binary(val, "data", work->data, sizeof(work->data))) {
-		fprintf(stderr, "JSON inval data\n");
+		applog(LOG_ERR, "JSON inval data");
 		goto err_out;
 	}
 
 	if (!jobj_binary(val, "hash1", work->hash1, sizeof(work->hash1))) {
-		fprintf(stderr, "JSON inval hash1\n");
+		applog(LOG_ERR, "JSON inval hash1");
 		goto err_out;
 	}
 
 	if (!jobj_binary(val, "target", work->target, sizeof(work->target))) {
-		fprintf(stderr, "JSON inval target\n");
+		applog(LOG_ERR, "JSON inval target");
 		goto err_out;
 	}
 
@@ -214,20 +260,17 @@ err_out:
 	return false;
 }
 
-static void submit_work(CURL *curl, struct work *work)
+static bool submit_upstream_work(CURL *curl, const struct work *work)
 {
 	char *hexstr = NULL;
 	json_t *val, *res;
-	char s[345], timestr[64];
-	time_t now;
-	struct tm *tm;
-
-	now = time(NULL);
+	char s[345];
+	bool rc = false;
 
 	/* build hex string */
 	hexstr = bin2hex(work->data, sizeof(work->data));
 	if (!hexstr) {
-		fprintf(stderr, "submit_work OOM\n");
+		applog(LOG_ERR, "submit_upstream_work OOM");
 		goto out;
 	}
 
@@ -237,37 +280,39 @@ static void submit_work(CURL *curl, struct work *work)
 		hexstr);
 
 	if (opt_debug)
-		fprintf(stderr, "DBG: sending RPC call:\n%s", s);
+		applog(LOG_DEBUG, "DBG: sending RPC call: %s", s);
 
 	/* issue JSON-RPC request */
-	val = json_rpc_call(curl, rpc_url, userpass, s);
+	val = json_rpc_call(curl, rpc_url, rpc_userpass, s, false, false);
 	if (!val) {
-		fprintf(stderr, "submit_work json_rpc_call failed\n");
+		applog(LOG_ERR, "submit_upstream_work json_rpc_call failed");
 		goto out;
 	}
 
 	res = json_object_get(val, "result");
 
-	tm = localtime(&now);
-	strftime(timestr, sizeof(timestr), "%Y-%m-%d %H:%M:%S", tm);
-
-	printf("[%s] PROOF OF WORK RESULT: %s\n",
-	       timestr, json_is_true(res) ? "true (yay!!!)" : "false (booooo)");
+	applog(LOG_INFO, "PROOF OF WORK RESULT: %s",
+	       json_is_true(res) ? "true (yay!!!)" : "false (booooo)");
 
 	json_decref(val);
 
+	rc = true;
+
 out:
 	free(hexstr);
+	return rc;
 }
 
-static bool get_work(CURL *curl, struct work *work)
+static const char *rpc_req =
+	"{\"method\": \"getwork\", \"params\": [], \"id\":0}\r\n";
+
+static bool get_upstream_work(CURL *curl, struct work *work)
 {
-	static const char *rpc_req =
-		"{\"method\": \"getwork\", \"params\": [], \"id\":0}\r\n";
 	json_t *val;
 	bool rc;
 
-	val = json_rpc_call(curl, rpc_url, userpass, rpc_req);
+	val = json_rpc_call(curl, rpc_url, rpc_userpass, rpc_req,
+			    want_longpoll, false);
 	if (!val)
 		return false;
 
@@ -276,6 +321,118 @@ static bool get_work(CURL *curl, struct work *work)
 	json_decref(val);
 
 	return rc;
+}
+
+static void workio_cmd_free(struct workio_cmd *wc)
+{
+	if (!wc)
+		return;
+
+	switch (wc->cmd) {
+	case WC_SUBMIT_WORK:
+		free(wc->u.work);
+		break;
+	default: /* do nothing */
+		break;
+	}
+
+	memset(wc, 0, sizeof(*wc));	/* poison */
+	free(wc);
+}
+
+static bool workio_get_work(struct workio_cmd *wc, CURL *curl)
+{
+	struct work *ret_work;
+	int failures = 0;
+
+	ret_work = calloc(1, sizeof(*ret_work));
+	if (!ret_work)
+		return false;
+
+	/* obtain new work from bitcoin via JSON-RPC */
+	while (!get_upstream_work(curl, ret_work)) {
+		if ((opt_retries >= 0) && (++failures > opt_retries)) {
+			applog(LOG_ERR, "json_rpc_call failed, terminating workio thread");
+			free(ret_work);
+			return false;
+		}
+
+		/* pause, then restart work-request loop */
+		applog(LOG_ERR, "json_rpc_call failed, retry after %d seconds",
+			opt_fail_pause);
+		sleep(opt_fail_pause);
+	}
+
+	/* send work to requesting thread */
+	if (!tq_push(wc->thr->q, ret_work))
+		free(ret_work);
+
+	return true;
+}
+
+static bool workio_submit_work(struct workio_cmd *wc, CURL *curl)
+{
+	int failures = 0;
+
+	/* submit solution to bitcoin via JSON-RPC */
+	while (!submit_upstream_work(curl, wc->u.work)) {
+		if ((opt_retries >= 0) && (++failures > opt_retries)) {
+			applog(LOG_ERR, "...terminating workio thread");
+			return false;
+		}
+
+		/* pause, then restart work-request loop */
+		applog(LOG_ERR, "...retry after %d seconds",
+			opt_fail_pause);
+		sleep(opt_fail_pause);
+	}
+
+	return true;
+}
+
+static void *workio_thread(void *userdata)
+{
+	struct thr_info *mythr = userdata;
+	CURL *curl;
+	bool ok = true;
+
+	curl = curl_easy_init();
+	if (!curl) {
+		applog(LOG_ERR, "CURL initialization failed");
+		return NULL;
+	}
+
+	while (ok) {
+		struct workio_cmd *wc;
+
+		/* wait for workio_cmd sent to us, on our queue */
+		wc = tq_pop(mythr->q, NULL);
+		if (!wc) {
+			ok = false;
+			break;
+		}
+
+		/* process workio_cmd */
+		switch (wc->cmd) {
+		case WC_GET_WORK:
+			ok = workio_get_work(wc, curl);
+			break;
+		case WC_SUBMIT_WORK:
+			ok = workio_submit_work(wc, curl);
+			break;
+
+		default:		/* should never happen */
+			ok = false;
+			break;
+		}
+
+		workio_cmd_free(wc);
+	}
+
+	tq_freeze(mythr->q);
+	curl_easy_cleanup(curl);
+
+	return NULL;
 }
 
 static void hashmeter(int thr_id, const struct timeval *diff,
@@ -287,44 +444,88 @@ static void hashmeter(int thr_id, const struct timeval *diff,
 	secs = (double)diff->tv_sec + ((double)diff->tv_usec / 1000000.0);
 
 	if (!opt_quiet)
-		printf("HashMeter(%d): %lu hashes, %.2f khash/sec\n",
+		applog(LOG_INFO, "thread %d: %lu hashes, %.2f khash/sec",
 		       thr_id, hashes_done,
 		       khashes / secs);
 }
 
-static void *miner_thread(void *thr_id_int)
+static bool get_work(struct thr_info *thr, struct work *work)
 {
-	int thr_id = (unsigned long) thr_id_int;
-	int failures = 0;
-	uint32_t max_nonce = 0xffffff;
-	CURL *curl;
+	struct workio_cmd *wc;
+	struct work *work_heap;
 
-	curl = curl_easy_init();
-	if (!curl) {
-		fprintf(stderr, "CURL initialization failed\n");
-		return NULL;
+	/* fill out work request message */
+	wc = calloc(1, sizeof(*wc));
+	if (!wc)
+		return false;
+
+	wc->cmd = WC_GET_WORK;
+	wc->thr = thr;
+
+	/* send work request to workio thread */
+	if (!tq_push(thr_info[work_thr_id].q, wc)) {
+		workio_cmd_free(wc);
+		return false;
 	}
+
+	/* wait for response, a unit of work */
+	work_heap = tq_pop(thr->q, NULL);
+	if (!work_heap)
+		return false;
+
+	/* copy returned work into storage provided by caller */
+	memcpy(work, work_heap, sizeof(*work));
+	free(work_heap);
+
+	return true;
+}
+
+static bool submit_work(struct thr_info *thr, const struct work *work_in)
+{
+	struct workio_cmd *wc;
+
+	/* fill out work request message */
+	wc = calloc(1, sizeof(*wc));
+	if (!wc)
+		return false;
+
+	wc->u.work = malloc(sizeof(*work_in));
+	if (!wc->u.work)
+		goto err_out;
+
+	wc->cmd = WC_SUBMIT_WORK;
+	wc->thr = thr;
+	memcpy(wc->u.work, work_in, sizeof(*work_in));
+
+	/* send solution to workio thread */
+	if (!tq_push(thr_info[work_thr_id].q, wc))
+		goto err_out;
+
+	return true;
+
+err_out:
+	workio_cmd_free(wc);
+	return false;
+}
+
+static void *miner_thread(void *userdata)
+{
+	struct thr_info *mythr = userdata;
+	int thr_id = mythr->id;
+	uint32_t max_nonce = 0xffffff;
 
 	while (1) {
 		struct work work __attribute__((aligned(128)));
 		unsigned long hashes_done;
 		struct timeval tv_start, tv_end, diff;
+		uint64_t max64;
 		bool rc;
 
-		/* obtain new work from bitcoin */
-		if (!get_work(curl, &work)) {
-			fprintf(stderr, "json_rpc_call failed, ");
-
-			if ((opt_retries >= 0) && (++failures > opt_retries)) {
-				fprintf(stderr, "terminating thread\n");
-				return NULL;	/* exit thread */
-			}
-
-			/* pause, then restart work loop */
-			fprintf(stderr, "retry after %d seconds\n",
-				opt_fail_pause);
-			sleep(opt_fail_pause);
-			continue;
+		/* obtain new work from internal workio thread */
+		if (!get_work(mythr, &work)) {
+			applog(LOG_ERR, "work retrieval failed, exiting "
+				"mining thread %d", mythr->id);
+			goto out;
 		}
 
 		hashes_done = 0;
@@ -333,7 +534,7 @@ static void *miner_thread(void *thr_id_int)
 		/* scan nonces for a proof-of-work hash */
 		switch (opt_algo) {
 		case ALGO_C:
-			rc = scanhash_c(work.midstate, work.data + 64,
+			rc = scanhash_c(thr_id, work.midstate, work.data + 64,
 				        work.hash1, work.hash, work.target,
 					max_nonce, &hashes_done);
 			break;
@@ -341,19 +542,19 @@ static void *miner_thread(void *thr_id_int)
 #ifdef WANT_X8664_SSE2
 		case ALGO_SSE2_64: {
 			unsigned int rc5 =
-			        scanhash_sse2_64(work.midstate, work.data + 64,
+			        scanhash_sse2_64(thr_id, work.midstate, work.data + 64,
 						 work.hash1, work.hash,
 						 work.target,
 					         max_nonce, &hashes_done);
 			rc = (rc5 == -1) ? false : true;
 			}
-			break;	
+			break;
 #endif
 
 #ifdef WANT_SSE2_4WAY
 		case ALGO_4WAY: {
 			unsigned int rc4 =
-				ScanHash_4WaySSE2(work.midstate, work.data + 64,
+				ScanHash_4WaySSE2(thr_id, work.midstate, work.data + 64,
 						  work.hash1, work.hash,
 						  work.target,
 						  max_nonce, &hashes_done);
@@ -364,19 +565,19 @@ static void *miner_thread(void *thr_id_int)
 
 #ifdef WANT_VIA_PADLOCK
 		case ALGO_VIA:
-			rc = scanhash_via(work.data, work.target,
+			rc = scanhash_via(thr_id, work.data, work.target,
 					  max_nonce, &hashes_done);
 			break;
 #endif
 		case ALGO_CRYPTOPP:
-			rc = scanhash_cryptopp(work.midstate, work.data + 64,
+			rc = scanhash_cryptopp(thr_id, work.midstate, work.data + 64,
 				        work.hash1, work.hash, work.target,
 					max_nonce, &hashes_done);
 			break;
 
 #ifdef WANT_CRYPTOPP_ASM32
 		case ALGO_CRYPTOPP_ASM32:
-			rc = scanhash_asm32(work.midstate, work.data + 64,
+			rc = scanhash_asm32(thr_id, work.midstate, work.data + 64,
 				        work.hash1, work.hash, work.target,
 					max_nonce, &hashes_done);
 			break;
@@ -384,7 +585,7 @@ static void *miner_thread(void *thr_id_int)
 
 		default:
 			/* should never happen */
-			return NULL;
+			goto out;
 		}
 
 		/* record scanhash elapsed time */
@@ -394,23 +595,104 @@ static void *miner_thread(void *thr_id_int)
 		hashmeter(thr_id, &diff, hashes_done);
 
 		/* adjust max_nonce to meet target scan time */
-		if (diff.tv_sec > (opt_scantime * 2))
-			max_nonce /= 2;			/* large decrease */
-		else if ((diff.tv_sec > opt_scantime) &&
-			 (max_nonce > 1500000))
-			max_nonce -= 1000000;		/* small decrease */
-		else if ((diff.tv_sec < opt_scantime) &&
-			 (max_nonce < 0xffffec76))
-			max_nonce += 100000;		/* small increase */
+		if (diff.tv_usec > 500000)
+			diff.tv_sec++;
+		if (diff.tv_sec > 0) {
+			max64 =
+			   ((uint64_t)hashes_done * opt_scantime) / diff.tv_sec;
+			if (max64 > 0xfffffffaULL)
+				max64 = 0xfffffffaULL;
+			max_nonce = max64;
+		}
 
 		/* if nonce found, submit work */
-		if (rc)
-			submit_work(curl, &work);
-
-		failures = 0;
+		if (rc && !submit_work(mythr, &work))
+			break;
 	}
 
-	curl_easy_cleanup(curl);
+out:
+	tq_freeze(mythr->q);
+
+	return NULL;
+}
+
+static void restart_threads(void)
+{
+	int i;
+
+	for (i = 0; i < opt_n_threads; i++)
+		work_restart[i].restart = 1;
+}
+
+static void *longpoll_thread(void *userdata)
+{
+	struct thr_info *mythr = userdata;
+	CURL *curl = NULL;
+	char *copy_start, *hdr_path, *lp_url = NULL;
+	bool need_slash = false;
+	int failures = 0;
+
+	hdr_path = tq_pop(mythr->q, NULL);
+	if (!hdr_path)
+		goto out;
+
+	/* full URL */
+	if (strstr(hdr_path, "://")) {
+		lp_url = hdr_path;
+		hdr_path = NULL;
+	}
+	
+	/* absolute path, on current server */
+	else {
+		copy_start = (*hdr_path == '/') ? (hdr_path + 1) : hdr_path;
+		if (rpc_url[strlen(rpc_url) - 1] != '/')
+			need_slash = true;
+
+		lp_url = malloc(strlen(rpc_url) + strlen(copy_start) + 2);
+		if (!lp_url)
+			goto out;
+
+		sprintf(lp_url, "%s%s%s", rpc_url, need_slash ? "/" : "", copy_start);
+	}
+
+	applog(LOG_INFO, "Long-polling activated for %s", lp_url);
+
+	curl = curl_easy_init();
+	if (!curl) {
+		applog(LOG_ERR, "CURL initialization failed");
+		goto out;
+	}
+
+	while (1) {
+		json_t *val;
+
+		val = json_rpc_call(curl, lp_url, rpc_userpass, rpc_req,
+				    false, true);
+		if (val) {
+			failures = 0;
+			json_decref(val);
+
+			applog(LOG_INFO, "LONGPOLL detected new block");
+			restart_threads();
+		} else {
+			if (failures++ < 10) {
+				sleep(30);
+				applog(LOG_ERR,
+					"longpoll failed, sleeping for 30s");
+			} else {
+				applog(LOG_ERR,
+					"longpoll failed, ending thread");
+				goto out;
+			}
+		}
+	}
+
+out:
+	free(hdr_path);
+	free(lp_url);
+	tq_freeze(mythr->q);
+	if (curl)
+		curl_easy_cleanup(curl);
 
 	return NULL;
 }
@@ -453,7 +735,7 @@ static void parse_arg (int key, char *arg)
 			json_decref(opt_config);
 		opt_config = json_load_file(arg, &err);
 		if (!json_is_object(opt_config)) {
-			fprintf(stderr, "JSON decode of %s failed\n", arg);
+			applog(LOG_ERR, "JSON decode of %s failed", arg);
 			show_usage();
 		}
 		break;
@@ -463,6 +745,10 @@ static void parse_arg (int key, char *arg)
 		break;
 	case 'D':
 		opt_debug = true;
+		break;
+	case 'p':
+		free(rpc_pass);
+		rpc_pass = strdup(arg);
 		break;
 	case 'P':
 		opt_protocol = true;
@@ -495,6 +781,10 @@ static void parse_arg (int key, char *arg)
 
 		opt_n_threads = v;
 		break;
+	case 'u':
+		free(rpc_user);
+		rpc_user = strdup(arg);
+		break;
 	case 1001:			/* --url */
 		if (strncmp(arg, "http://", 7) &&
 		    strncmp(arg, "https://", 8))
@@ -507,8 +797,14 @@ static void parse_arg (int key, char *arg)
 		if (!strchr(arg, ':'))
 			show_usage();
 
-		free(userpass);
-		userpass = strdup(arg);
+		free(rpc_userpass);
+		rpc_userpass = strdup(arg);
+		break;
+	case 1003:
+		want_longpoll = false;
+		break;
+	case 1004:
+		use_syslog = true;
 		break;
 	default:
 		show_usage();
@@ -542,7 +838,7 @@ static void parse_config(void)
 		} else if (!options[i].has_arg && json_is_true(val))
 			parse_arg(options[i].val, "");
 		else
-			fprintf(stderr, "JSON option %s invalid\n",
+			applog(LOG_ERR, "JSON option %s invalid",
 				options[i].name);
 	}
 }
@@ -564,44 +860,101 @@ static void parse_cmdline(int argc, char *argv[])
 
 int main (int argc, char *argv[])
 {
+	struct thr_info *thr;
 	int i;
-	pthread_t *t_all;
 
 	rpc_url = strdup(DEF_RPC_URL);
-	userpass = strdup(DEF_RPC_USERPASS);
 
 	/* parse command line */
 	parse_cmdline(argc, argv);
+
+	if (!rpc_userpass) {
+		if (!rpc_user || !rpc_pass) {
+			applog(LOG_ERR, "No login credentials supplied");
+			return 1;
+		}
+		rpc_userpass = malloc(strlen(rpc_user) + strlen(rpc_pass) + 2);
+		if (!rpc_userpass)
+			return 1;
+		sprintf(rpc_userpass, "%s:%s", rpc_user, rpc_pass);
+	}
+
+	pthread_mutex_init(&time_lock, NULL);
+
+#ifdef HAVE_SYSLOG_H
+	if (use_syslog)
+		openlog("cpuminer", LOG_PID, LOG_USER);
+#endif
 
 	/* set our priority to the highest (aka "nicest, least intrusive") */
 	if (setpriority(PRIO_PROCESS, 0, 19))
 		perror("setpriority");
 
-	t_all = calloc(opt_n_threads, sizeof(pthread_t));
-	if (!t_all)
+	work_restart = calloc(opt_n_threads, sizeof(*work_restart));
+	if (!work_restart)
 		return 1;
+
+	thr_info = calloc(opt_n_threads + 2, sizeof(*thr));
+	if (!thr_info)
+		return 1;
+
+	/* init workio thread info */
+	work_thr_id = opt_n_threads;
+	thr = &thr_info[work_thr_id];
+	thr->id = work_thr_id;
+	thr->q = tq_new();
+	if (!thr->q)
+		return 1;
+
+	/* start work I/O thread */
+	if (pthread_create(&thr->pth, NULL, workio_thread, thr)) {
+		applog(LOG_ERR, "workio thread create failed");
+		return 1;
+	}
+
+	/* init longpoll thread info */
+	if (want_longpoll) {
+		longpoll_thr_id = opt_n_threads + 1;
+		thr = &thr_info[longpoll_thr_id];
+		thr->id = longpoll_thr_id;
+		thr->q = tq_new();
+		if (!thr->q)
+			return 1;
+
+		/* start longpoll thread */
+		if (pthread_create(&thr->pth, NULL, longpoll_thread, thr)) {
+			applog(LOG_ERR, "longpoll thread create failed");
+			return 1;
+		}
+	} else
+		longpoll_thr_id = -1;
 
 	/* start mining threads */
 	for (i = 0; i < opt_n_threads; i++) {
-		if (pthread_create(&t_all[i], NULL, miner_thread,
-				   (void *)(unsigned long) i)) {
-			fprintf(stderr, "thread %d create failed\n", i);
+		thr = &thr_info[i];
+
+		thr->id = i;
+		thr->q = tq_new();
+		if (!thr->q)
+			return 1;
+
+		if (pthread_create(&thr->pth, NULL, miner_thread, thr)) {
+			applog(LOG_ERR, "thread %d create failed", i);
 			return 1;
 		}
 
 		sleep(1);	/* don't pound RPC server all at once */
 	}
 
-	fprintf(stderr, "%d miner threads started, "
-		"using SHA256 '%s' algorithm.\n",
+	applog(LOG_INFO, "%d miner threads started, "
+		"using SHA256 '%s' algorithm.",
 		opt_n_threads,
 		algo_names[opt_algo]);
 
-	/* main loop - simply wait for all threads to exit */
-	for (i = 0; i < opt_n_threads; i++)
-		pthread_join(t_all[i], NULL);
+	/* main loop - simply wait for workio thread to exit */
+	pthread_join(thr_info[work_thr_id].pth, NULL);
 
-	fprintf(stderr, "all threads dead, fred. exiting.\n");
+	applog(LOG_INFO, "workio thread dead, exiting.");
 
 	return 0;
 }

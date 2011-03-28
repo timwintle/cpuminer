@@ -1,4 +1,4 @@
-AC_INIT([cpuminer], [0.7.1])
+AC_INIT([cpuminer], [0.8.1])
 
 AC_PREREQ(2.52)
 AC_CONFIG_SRCDIR([cpu-miner.c])
@@ -16,6 +16,9 @@ AC_PROG_RANLIB
 
 dnl Checks for header files.
 AC_HEADER_STDC
+AC_CHECK_HEADERS(syslog.h)
+
+AC_FUNC_ALLOCA
 
 case $host in
   *-*-mingw*)
@@ -33,6 +36,7 @@ AC_CHECK_LIB(jansson, json_loads, request_jansson=false, request_jansson=true)
 AC_CHECK_LIB(pthread, pthread_create, PTHREAD_LIBS=-lpthread)
 
 AM_CONDITIONAL([WANT_JANSSON], [test x$request_jansson = xtrue])
+AM_CONDITIONAL([HAVE_WINDOWS], [test x$have_win32 = xtrue])
 
 if test x$request_jansson = xtrue
 then

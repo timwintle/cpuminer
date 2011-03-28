@@ -4,10 +4,12 @@
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option) 
+ * Software Foundation; either version 2 of the License, or (at your option)
  * any later version.
  *
  */
+
+#include "cpuminer-config.h"
 
 #include "miner.h"
 
@@ -47,7 +49,8 @@ uint32_t g_sha256_hinit[8] =
 
 __m128i g_4sha256_k[64];
 
-int scanhash_sse2_64(const unsigned char *pmidstate, unsigned char *pdata,
+int scanhash_sse2_64(int thr_id, const unsigned char *pmidstate,
+	unsigned char *pdata,
 	unsigned char *phash1, unsigned char *phash,
 	const unsigned char *ptarget,
 	uint32_t max_nonce, unsigned long *nHashesDone)
@@ -57,8 +60,9 @@ int scanhash_sse2_64(const unsigned char *pmidstate, unsigned char *pdata,
     uint32_t m_midstate[8], m_w[16], m_w1[16];
     __m128i m_4w[64], m_4hash[64], m_4hash1[64];
     __m128i offset;
-    __m128i g_4sha256_hinit[8];
     int i;
+
+    work_restart[thr_id].restart = 0;
 
     /* For debugging */
     union {
@@ -117,7 +121,7 @@ int scanhash_sse2_64(const unsigned char *pmidstate, unsigned char *pdata,
 
 	nonce += 4;
 
-        if (nonce >= max_nonce)
+        if ((nonce >= max_nonce) || work_restart[thr_id].restart)
         {
             *nHashesDone = nonce;
             return -1;
