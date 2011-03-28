@@ -42,6 +42,8 @@ else
 fi
 
 dnl Find YASM
+dnl YASM needs to be greater than version 1.0.1
+
 has_yasm=false
 AC_PATH_PROG(YASM,[yasm],[true yasm])
 if test "$YASM" = "false" ; then
@@ -53,11 +55,11 @@ else
   yaminor=`echo $yasmver | cut -d. -f2`
   yamini=`echo $yasmver | cut -d. -f3`
   if test "$yamajor" -ge "1" ; then
-    if test "$yamajor" -eq "1" ; then
-      if test "$yaminor" -ge "0" ; then
-        if test "$yamini" -ge "1"; then
-          has_yasm=true
-        fi
+    if test "$yamini" -ge "1" ; then
+      has_yasm=true
+    else
+      if test "$yaminor" -ge "1" ; then
+        has_yasm=true
       fi
     fi
   else
