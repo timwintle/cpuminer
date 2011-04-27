@@ -19,7 +19,7 @@ global CalcSha256_x64
 ;	CalcSha256	hash(rdi), data(rsi), init(rdx)
 CalcSha256_x64:	
 
-	push	rbx
+;	push	rbx
 
 LAB_NEXT_NONCE:
 	mov	r11, data
@@ -42,6 +42,8 @@ LAB_SHA:
 	lea	r11, qword [r11+rax*4]
 LAB_CALC:
 	movdqa	xmm0, [r11-15*16]
+	movdqa  xmm3, [r11-2*16]
+	nop
 	movdqa	xmm2, xmm0					; (Rotr32(w_15, 7) ^ Rotr32(w_15, 18) ^ (w_15 >> 3))
 	psrld	xmm0, 3
 	movdqa	xmm1, xmm0
@@ -56,7 +58,7 @@ LAB_CALC:
 
 	paddd	xmm0, [r11-16*16]
 
-	movdqa	xmm3, [r11-2*16]
+	;;movdqa	xmm3, [r11-2*16]
 	movdqa	xmm2, xmm3					; (Rotr32(w_2, 17) ^ Rotr32(w_2, 19) ^ (w_2 >> 10))
 	psrld	xmm3, 10
 	movdqa	xmm1, xmm3
@@ -103,14 +105,20 @@ LAB_LOOP:
 ;; T t1 = h + (Rotr32(e, 6) ^ Rotr32(e, 11) ^ Rotr32(e, 25)) + ((e & f) ^ AndNot(e, g)) + Expand32<T>(g_sha256_k[j]) + w[j]
 
 	movdqa	xmm6, [rsi+rax*4]
+
+	movdqa	xmm1, xmm0
+	movdqa	xmm2, xmm9
+	pandn	xmm1, xmm2	; ~e & g
+
 	paddd	xmm6, g_4sha256_k[rax*4]
 	add	rax, 4
 
 	paddd	xmm6, xmm10	; +h
 
-	movdqa	xmm1, xmm0
-	movdqa	xmm2, xmm9
-	pandn	xmm1, xmm2	; ~e & g
+;; Another register stall avoidance
+;;	movdqa	xmm1, xmm0
+;;	movdqa	xmm2, xmm9
+;;	pandn	xmm1, xmm2	; ~e & g
 
 	movdqa	xmm10, xmm2	; h = g
 	movdqa	xmm2, xmm8	; f
@@ -215,5 +223,5 @@ debug_me:
 	movdqa	[rdi+7*16], xmm10
 
 LAB_RET:
-	pop	rbx
+;	pop	rbx
 	ret
