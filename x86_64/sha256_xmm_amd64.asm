@@ -167,8 +167,11 @@ LAB_LOOP:
 	pxor	xmm7, xmm2
 	paddd	xmm7, xmm6	; a = t1 + (Rotr32(a, 2) ^ Rotr32(a, 13) ^ Rotr32(a, 22)) + ((a & c) ^ (a & d) ^ (c & d));	
 
-	cmp	rax, rcx
-	jb	LAB_LOOP
+    ;cmp rax, rcx
+    ;jb LAB_LOOP
+    
+	test rax, rcx       ; was cmp - as we're iterating up to a power of 2 we can test
+	je	LAB_LOOP        ; was 
 
 ; Finished the 64 rounds, calculate hash and save
 
