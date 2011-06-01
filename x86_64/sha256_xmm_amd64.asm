@@ -97,6 +97,7 @@ LAB_CALC:
 	movd	xmm10, dword [rdx+7*4]		; xmm10 == h
 	pshufd  xmm10, xmm10, 0
 
+ALIGN 16
 LAB_LOOP:
 
 ;; T t1 = h + (Rotr32(e, 6) ^ Rotr32(e, 11) ^ Rotr32(e, 25)) + ((e & f) ^ AndNot(e, g)) + Expand32<T>(g_sha256_k[j]) + w[j]
