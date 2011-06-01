@@ -76,7 +76,7 @@ LAB_CALC:
 	jb	LAB_CALC
 	pop	rcx
 
-	mov rax, 0
+	xor rax, rax
 
 ; Load the init values of the message into the hash.
 
