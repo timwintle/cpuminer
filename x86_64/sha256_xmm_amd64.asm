@@ -37,6 +37,8 @@ LAB_NEXT_NONCE:
 LAB_SHA:
 	lea	rbp, qword [r11+rcx*4]
 	lea	r11, qword [r11+rax*4]
+
+ALIGN 16
 LAB_CALC:
 	movdqa	xmm0, [r11-15*16]
 	movdqa  xmm3, [r11-2*16]
@@ -165,9 +167,6 @@ LAB_LOOP:
 	pslld	xmm2, 11
 	pxor	xmm7, xmm2
 	paddd	xmm7, xmm6	; a = t1 + (Rotr32(a, 2) ^ Rotr32(a, 13) ^ Rotr32(a, 22)) + ((a & c) ^ (a & d) ^ (c & d));	
-
-    ;cmp rax, rcx
-    ;jb LAB_LOOP
     
 	test rax, rcx       ; was cmp - as we're iterating up to a power of 2 we can test
 	je	LAB_LOOP        ; was 
