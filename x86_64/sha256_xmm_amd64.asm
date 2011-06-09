@@ -35,7 +35,8 @@ LAB_NEXT_NONCE:
 	mov	rax, 16*4 ;rax is where we expand to
 
 LAB_SHA:
-	lea	rbp, qword [r11+rcx*4]
+    push rcx
+	lea	rcx, qword [r11+rcx*4]
 	lea	r11, qword [r11+rax*4]
 
 ALIGN 16
@@ -73,8 +74,9 @@ LAB_CALC:
 	paddd	xmm0, [r11-7*16]
 	movdqa	[r11], xmm0
 	add	r11, 16
-	cmp	r11, rbp
+	cmp	r11, rcx
 	jb	LAB_CALC
+	pop rcx
 
 	xor rax, rax
 
