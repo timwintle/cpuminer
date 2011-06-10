@@ -20,6 +20,8 @@ global CalcSha256_x64
 CalcSha256_x64:	
 
 LAB_NEXT_NONCE:
+	mov	r10, 64*4 ;rcx is # of SHA-2 rounds
+	
 	mov	r11, data
 ;	mov	rax, pnonce
 ;	mov	eax, [rax]
@@ -31,13 +33,9 @@ LAB_NEXT_NONCE:
 ;	inc	eax
 ;	mov	[rbx+3*16+12], eax
 
-	mov	rcx, 64*4 ;rcx is # of SHA-2 rounds
-	mov	rax, 16*4 ;rax is where we expand to
-
 LAB_SHA:
-    mov r10, rcx
-	lea	rcx, qword [r11+rcx*4]
-	lea	r11, qword [r11+rax*4]
+	lea	rcx, qword [data+64*4*4]
+	lea	r11, qword [data+16*4*4]
 
 ALIGN 16
 LAB_CALC:
@@ -104,7 +102,7 @@ LAB_LOOP:
 
 ;; T t1 = h + (Rotr32(e, 6) ^ Rotr32(e, 11) ^ Rotr32(e, 25)) + ((e & f) ^ AndNot(e, g)) + Expand32<T>(g_sha256_k[j]) + w[j]
 
-	movdqa	xmm6, [rsi+rax*4]
+	movdqa	xmm6, [data+rax*4]
 
 	movdqa	xmm1, xmm0
 	movdqa	xmm2, xmm9
@@ -170,7 +168,7 @@ LAB_LOOP:
 	pxor	xmm7, xmm2
 	paddd	xmm7, xmm6	; a = t1 + (Rotr32(a, 2) ^ Rotr32(a, 13) ^ Rotr32(a, 22)) + ((a & c) ^ (a & d) ^ (c & d));	
     
-	test rax, rcx       ; was cmp - as we're iterating up to a power of 2 we can test
+	test rax, r10       ; was cmp - as we're iterating up to a power of 2 we can test
 	je	LAB_LOOP        ; was 
 
 ; Finished the 64 rounds, calculate hash and save
