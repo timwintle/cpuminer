@@ -48,6 +48,13 @@ static inline void drop_policy(void)
 #endif
 }
 
+/** Retain backwards compatibility */
+#if JANSSON_VERSION_HEX >= 0x020000
+#define JSON_LOAD_FILE(a, b) json_load_file(a, 0, b)
+#else
+#define JSON_LOAD_FILE(a, b) json_load_file(a, b)
+#endif
+
 static inline void affine_to_cpu(int id, int cpu)
 {
 	cpu_set_t set;
@@ -783,7 +790,7 @@ static void parse_arg (int key, char *arg)
 		json_error_t err;
 		if (opt_config)
 			json_decref(opt_config);
-		opt_config = json_load_file(arg, &err);
+		opt_config = JSON_LOAD_FILE(arg, &err);
 		if (!json_is_object(opt_config)) {
 			applog(LOG_ERR, "JSON decode of %s failed", arg);
 			show_usage();
